@@ -5,9 +5,8 @@
 # command below supplies the rest. Ctrl+C stops it; the downloader drains and
 # finalises on the way out.
 #
-# The muxed .ts can be opened in a player while the recording is still running.
-# It is written at playback rate rather than as fast as segments arrive, so it
-# always has more on disk than the player has consumed.
+# The muxed .ts can be opened while recording, and the rolling live playlist is
+# available on the host at http://127.0.0.1:8080/live.m3u8.
 #
 # For anything other than a plain recording, address the service directly:
 #   docker compose run --rm recorder probe
@@ -23,7 +22,10 @@ services:
 
     # The default action is the one people came here for. Overriding it is still
     # a matter of naming a different subcommand after the service.
-    command: ["capture"]
+    command: ["capture", "--hls", "0.0.0.0:8080"]
+
+    ports:
+      - "127.0.0.1:8080:8080"
 
     volumes:
       # Both halves of a run land here: artefacts in ./archive/run_<stamp>/ and

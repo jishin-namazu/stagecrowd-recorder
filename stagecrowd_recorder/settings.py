@@ -28,9 +28,11 @@ ENV_CDM = PREFIX + "CDM"
 ENV_OUT = PREFIX + "OUT"
 ENV_SETTINGS_FILE = PREFIX + "SETTINGS"
 ENV_HEADERS = PREFIX + "HEADERS"
+ENV_HLS = PREFIX + "HLS"
 
 DEFAULT_CDM = Path("/config/device.wvd")
 DEFAULT_OUT_ROOT = Path("archive")
+DEFAULT_HLS_ADDRESS = "127.0.0.1:8080"
 
 # Searched in order. .env is accepted because that is what the surrounding
 # tooling already writes, and the parser reads it the same way either name.
@@ -62,6 +64,8 @@ _ALIASES = {
     "out": ENV_OUT,
     "output": ENV_OUT,
     "headers": ENV_HEADERS,
+    "hls": ENV_HLS,
+    "hls_address": ENV_HLS,
 }
 
 
@@ -160,6 +164,7 @@ class Settings:
     shard_log: bool = True
     shard_echo: bool = True
     guard_interval: float = 240.0
+    hls_address: str = ""
     extra: dict[str, str] = field(default_factory=dict)
 
     @property

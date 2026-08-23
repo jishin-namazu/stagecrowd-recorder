@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import shared
+
 VIDEO = "video"
 AUDIO = "audio"
 SUBTITLE = "subtitle"
@@ -347,12 +349,14 @@ class ShardWatcher:
         root: Path,
         *,
         log_dir: Path | None = None,
+        mirror_root: Path | None = None,
         echo=None,
         hint_ms: int | None = None,
         decrypting: bool | None = None,
     ) -> None:
         self.root = root
         self.log_dir = log_dir
+        self.mirror_root = mirror_root
         self.echo = echo
         self.decrypting = decrypting
         self.tallies: dict[str, TrackTally] = {}
@@ -405,15 +409,27 @@ class ShardWatcher:
     def sweep(self) -> None:
         if not self.root.is_dir():
             return
+        if self.mirror_root is not None:
+            shared.mirror_metadata(self.root, self.mirror_root)
         arrivals: list[tuple[Path, str]] = []
         for directory in sorted(self.root.iterdir()):
             if not directory.is_dir():
                 continue
             track = read_track(directory, decrypting=self.decrypting)
+            if self.mirror_root is not None and track.init is not None:
+                shared.mirror_file(
+                    track.init,
+                    self.mirror_root / directory.name / track.init.name,
+                )
             for shard in track.shards:
                 marker = identity(shard)
                 if marker in self._seen:
                     continue
+                if self.mirror_root is not None:
+                    shared.mirror_file(
+                        shard,
+                        self.mirror_root / directory.name / shard.name,
+                    )
                 self._seen.add(marker)
                 arrivals.append((shard, track.kind))
 

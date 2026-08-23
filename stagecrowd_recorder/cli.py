@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+from . import backfill as backfill_mod
 from . import console, runbook, salvage, settings as cfg
 from .errors import ArcError
 from .settings import Settings
@@ -40,9 +41,9 @@ def _settings_file_from_argv(argv: list[str]) -> Path | None:
     argparse accepts — ``--settings X``, ``--settings=X``, and prefix
     abbreviations such as ``--set X`` — resolves to the same file here.
 
-    It scans the whole argv, so it also picks the flag up after ``rebuild`` or
-    ``probe``, where the real parser does not accept it and will exit with
-    "unrecognized arguments". The file is loaded either way; only the exit
+    It scans the whole argv, so it also picks the flag up after ``backfill``,
+    ``rebuild`` or ``probe``, where the real parser does not accept it and will
+    exit with "unrecognized arguments". The file is loaded either way; only the exit
     status differs.
 
     A malformed argv yields None rather than a diagnostic: complaining is the
@@ -135,6 +136,15 @@ def _add_stream_options(parser: argparse.ArgumentParser) -> None:
         help="write the muxed file as fast as data arrives; faster, but the file "
         "cannot be played while it is being written",
     )
+    parser.add_argument(
+        "--hls",
+        nargs="?",
+        const=cfg.DEFAULT_HLS_ADDRESS,
+        default=cfg.env(cfg.ENV_HLS),
+        metavar="HOST:PORT",
+        help="serve a rolling live.m3u8 over HTTP; without an address, use "
+        f"{cfg.DEFAULT_HLS_ADDRESS}",
+    )
     parser.add_argument("--quiet-shards", action="store_true", help="do not echo each shard to the console")
     parser.add_argument("--no-shard-log", action="store_true", help="do not track shards at all")
     parser.add_argument("--verbose-downloader", action="store_true", help="let the downloader log to the console")
@@ -144,6 +154,13 @@ def _add_stream_options(parser: argparse.ArgumentParser) -> None:
         default=240.0,
         help="seconds between key-rotation re-checks (default: 240)",
     )
+
+
+def _rate_limit(value: str) -> int:
+    try:
+        return backfill_mod.parse_rate_limit(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,6 +182,28 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild = subcommands.add_parser("rebuild", help="rebuild a playable file from kept shards")
     rebuild.add_argument("target", help="a run output directory, or a shard directory")
     rebuild.add_argument("-o", "--output", help="destination file (default: <shards>-rebuilt.mkv)")
+
+    backfill = subcommands.add_parser(
+        "backfill", help="discover CDN indexes and recover shards missing locally"
+    )
+    backfill.add_argument("target", help="a run output directory, or its shard directory")
+    backfill.add_argument(
+        "--rate-limit",
+        type=_rate_limit,
+        default=backfill_mod.DEFAULT_RATE_LIMIT,
+        metavar="RATE",
+        help="maximum sequential download rate, e.g. 512K or 3M (default: 3M)",
+    )
+    backfill.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="print the CDN range and missing counts without downloading",
+    )
+    backfill.add_argument(
+        "--include-live-tail",
+        action="store_true",
+        help="also fetch indexes newer than an actively growing local run",
+    )
 
     probe = subcommands.add_parser("probe", help="exercise the toolchain and the CDM")
     probe.add_argument("--cdm", default=cfg.env(cfg.ENV_CDM) or str(cfg.DEFAULT_CDM))
@@ -191,6 +230,7 @@ def _settings_from(args: argparse.Namespace) -> Settings:
         shard_log=not args.no_shard_log,
         shard_echo=not args.quiet_shards,
         guard_interval=args.guard_interval,
+        hls_address=(args.hls or "").strip(),
     )
 
 
@@ -213,6 +253,41 @@ def _run_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_backfill(args: argparse.Namespace) -> int:
+    console.stage("discovering CDN shards")
+    result = backfill_mod.run(
+        Path(args.target),
+        rate_limit=args.rate_limit,
+        scan_only=args.scan_only,
+        include_live_tail=args.include_live_tail,
+        echo=console.detail,
+    )
+    if result.active and not args.include_live_tail:
+        console.warn(
+            "the run is still growing — backfill stopped at the newest local index "
+            "to avoid racing the recorder"
+        )
+    console.stage("backfill")
+    for track in result.tracks:
+        console.detail(
+            f"{track.kind}: CDN {track.remote_first}..{track.remote_last}; "
+            f"checked through {track.considered_last}; local {track.local}; "
+            f"missing {track.missing}; recovered {track.recovered}"
+        )
+        if track.failures:
+            shown = ", ".join(str(index) for index in track.failures[:8])
+            if len(track.failures) > 8:
+                shown += f", and {len(track.failures) - 8} more"
+            console.warn(f"{track.kind}: failed CDN indexes: {shown}")
+    if args.scan_only:
+        console.good("CDN scan complete")
+        return 0
+    if result.ok:
+        console.good("local shards cover every checked CDN index")
+        return 0
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -224,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "rebuild":
             return _run_rebuild(args)
+        if args.command == "backfill":
+            return _run_backfill(args)
         if args.command == "probe":
             return runbook.probe_environment(
                 Settings(cdm_path=Path(args.cdm), decryptor=args.decryptor)

@@ -53,3 +53,7 @@ class CaptureError(ArcError):
 
 class SalvageError(ArcError):
     """Shards could not be located or rebuilt."""
+
+
+class BackfillError(ArcError):
+    """CDN shards could not be discovered or recovered."""

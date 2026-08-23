@@ -74,6 +74,12 @@ def get(url: str, *, headers: dict[str, str] | None = None, timeout: float = DEF
     return _send(urllib.request.Request(url, headers=merged, method="GET"), timeout)
 
 
+def head(url: str, *, headers: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT) -> Reply:
+    """Fetch response metadata without transferring the media body."""
+    merged = {"User-Agent": DEFAULT_UA, "Accept": "*/*", **(headers or {})}
+    return _send(urllib.request.Request(url, headers=merged, method="HEAD"), timeout)
+
+
 def post(
     url: str,
     body: bytes,

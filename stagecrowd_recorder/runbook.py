@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import capture, console, coverage, licensing, playlist, records, shards
+from . import capture, console, coverage, hls, licensing, playlist, records, shared, shards
 from .errors import ArcError, ConfigError, LicenseError
 from .keys import KeyRing
 from .playlist import Source
@@ -54,6 +54,7 @@ class Prepared:
     out_dir: Path
     run_name: str
     shard_root: Path
+    session_shard_root: Path
     tools: Toolchain
     tool_versions: dict[str, str]
 
@@ -112,6 +113,8 @@ def gather_keys(settings: Settings, source: Source) -> KeyRing:
 
 
 def prepare(settings: Settings) -> Prepared:
+    if settings.hls_address:
+        hls.Endpoint.parse(settings.hls_address)
     if not settings.url:
         raise ConfigError(
             "no stream URL was given",
@@ -160,13 +163,21 @@ def prepare(settings: Settings) -> Prepared:
     versions = tools.verify()
     console.table(sorted(versions.items()))
 
+    session_shard_root = shards.shard_root(run_name)
+    shared_shard_root = (
+        shared.canonical_shard_root(source.url, session_shard_root)
+        if settings.keep_shards
+        else session_shard_root
+    )
+
     return Prepared(
         source=source,
         keys=keys,
         report=report,
         out_dir=out_dir,
         run_name=run_name,
-        shard_root=shards.shard_root(run_name),
+        shard_root=shared_shard_root,
+        session_shard_root=session_shard_root,
         tools=tools,
         tool_versions=versions,
     )
@@ -211,6 +222,7 @@ def write_artefacts(prepared: Prepared, settings: Settings) -> None:
         run_name=prepared.run_name,
         output_dir=prepared.out_dir,
         shard_root=prepared.shard_root,
+        session_shard_root=prepared.session_shard_root,
         shards_kept=settings.keep_shards,
         decryptor=settings.decryptor.value,
         tool_versions=prepared.tool_versions,
@@ -231,6 +243,7 @@ def build_plan(prepared: Prepared, settings: Settings) -> capture.CapturePlan:
         keep_shards=settings.keep_shards,
         quiet=settings.quiet_downloader,
         paced=settings.paced_output,
+        hls=bool(settings.hls_address),
     )
 
 
@@ -241,11 +254,12 @@ def execute(settings: Settings) -> int:
     plan = build_plan(prepared, settings)
 
     watcher = None
-    if settings.shard_log and settings.keep_shards:
+    if settings.keep_shards:
         watcher = shards.ShardWatcher(
-            prepared.shard_root,
-            log_dir=prepared.out_dir,
-            echo=console.say if settings.shard_echo else None,
+            prepared.session_shard_root,
+            log_dir=prepared.out_dir if settings.shard_log else None,
+            mirror_root=prepared.shard_root,
+            echo=console.say if settings.shard_log and settings.shard_echo else None,
             hint_ms=prepared.source.segment_ms or None,
             decrypting=True,
         )
@@ -254,23 +268,34 @@ def execute(settings: Settings) -> int:
         prepared.source.url,
         prepared.keys,
         interval=settings.guard_interval,
-        shard_root=prepared.shard_root,
+        shard_root=prepared.session_shard_root,
         accepted=prepared.report.missing,
         echo=console.warn,
     )
 
     console.stage("capturing")
     console.detail(f"output   {prepared.out_dir}")
-    console.detail(f"shards   {prepared.shard_root}")
+    console.detail(f"shards   {prepared.shard_root}  (shared by this playback URL)")
+    if prepared.session_shard_root != prepared.shard_root:
+        console.detail(f"session  {prepared.session_shard_root}")
     if plan.live and plan.paced:
         console.detail(f"file     {plan.muxed_output}  (playable while recording)")
+    hls_server = None
+    if settings.hls_address:
+        endpoint = hls.Endpoint.parse(settings.hls_address)
+        hls_server = hls.HlsServer(plan.hls_directory, endpoint)
+        console.detail(f"hls      {hls_server.url}")
 
-    if watcher is not None:
-        watcher.start()
-    guard.start()
     try:
+        if watcher is not None:
+            watcher.start()
+        guard.start()
+        if hls_server is not None:
+            hls_server.start()
         status = capture.run(plan)
     finally:
+        if hls_server is not None:
+            hls_server.stop()
         guard.stop()
         if watcher is not None:
             watcher.stop()
@@ -301,6 +326,7 @@ def describe_plan(settings: Settings) -> int:
                 run_name=prepared.run_name,
                 output_dir=prepared.out_dir,
                 shard_root=prepared.shard_root,
+                session_shard_root=prepared.session_shard_root,
                 shards_kept=settings.keep_shards,
                 decryptor=settings.decryptor.value,
                 tool_versions=prepared.tool_versions,

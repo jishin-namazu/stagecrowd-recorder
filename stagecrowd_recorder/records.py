@@ -35,6 +35,7 @@ class RunRecord:
     shard_root: Path
     shards_kept: bool
     decryptor: str
+    session_shard_root: Path | None = None
     tool_versions: dict[str, str] = field(default_factory=dict)
     key_kids: list[str] = field(default_factory=list)
     stream_kids: list[str] = field(default_factory=list)
@@ -52,7 +53,11 @@ class RunRecord:
             "run_name": self.run_name,
             "output_dir": str(output),
             "shard_root": str(shard_root),
+            "shared_shard_root": str(shard_root),
             "shard_root_relative": relative,
+            "session_shard_root": str(self.session_shard_root.resolve())
+            if self.session_shard_root is not None
+            else str(shard_root),
             "shards_kept": self.shards_kept,
             "decryptor": self.decryptor,
             "tool_versions": self.tool_versions,

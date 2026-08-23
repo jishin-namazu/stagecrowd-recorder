@@ -16,7 +16,8 @@ paced output, at playback rate, instead of writing each batch as fast as the
 disk accepts it. That single flag is the difference between a file that grows in
 8 MB steps every twelve seconds and one that grows continuously, which is what
 decides whether a player can be pointed at the file while it is still being
-written.
+written. When HLS serving is configured, the same ffmpeg process uses its tee
+muxer to keep that archive while maintaining a short rolling live playlist.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import CaptureError
+from .errors import CaptureError, ConfigError
 from .keys import KeyRing
 from .toolchain import Toolchain
 
@@ -35,6 +36,18 @@ LOG_NAME = "downloader.log"
 # Read by the downloader, not by us. Its presence is what makes the muxing
 # ffmpeg run with -re; its value is where that ffmpeg writes.
 PIPE_OPTIONS_ENV = "RE_LIVE_PIPE_OPTIONS"
+
+_UNSAFE_TEE_CHARACTERS = frozenset("\r\n\"'|")
+
+
+def _tee_path(path: Path) -> str:
+    value = path.as_posix()
+    if any(character in _UNSAFE_TEE_CHARACTERS for character in value):
+        raise ConfigError(
+            "the output path contains a character ffmpeg's tee output cannot quote safely",
+            remedy="Choose an --out path without quotes, line breaks, or |.",
+        )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +61,23 @@ class CapturePlan:
     keep_shards: bool = True
     quiet: bool = True
     paced: bool = True
+    hls: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.hls:
+            return
+        if not self.live:
+            raise ConfigError(
+                "HLS serving is only available for a live stream",
+                remedy="Remove --hls when capturing a finished VOD playlist.",
+            )
+        if not self.paced:
+            raise ConfigError(
+                "--hls cannot be combined with --burst-output",
+                remedy="Remove --burst-output so the playlist advances in real time.",
+            )
+        _tee_path(self.muxed_output)
+        _tee_path(self.hls_playlist)
 
     @property
     def muxed_output(self) -> Path:
@@ -59,6 +89,14 @@ class CapturePlan:
         """
         return self.out_dir / f"{self.run_name}.ts"
 
+    @property
+    def hls_directory(self) -> Path:
+        return self.out_dir / "hls"
+
+    @property
+    def hls_playlist(self) -> Path:
+        return self.hls_directory / "live.m3u8"
+
     def environment(self) -> dict[str, str]:
         """The child's environment.
 
@@ -69,8 +107,22 @@ class CapturePlan:
         """
         env = dict(os.environ)
         if self.live and self.paced:
-            env[PIPE_OPTIONS_ENV] = str(self.muxed_output)
+            env[PIPE_OPTIONS_ENV] = self.pipe_options
         return env
+
+    @property
+    def pipe_options(self) -> str:
+        """Destination passed to the downloader's live ffmpeg process."""
+        if not self.hls:
+            return str(self.muxed_output)
+        archive = f"[f=mpegts:onfail=abort]{_tee_path(self.muxed_output)}"
+        flags = "delete_segments+omit_endlist+independent_segments+temp_file"
+        live = (
+            "[f=hls:onfail=ignore:hls_time=2:hls_list_size=6:"
+            f"hls_delete_threshold=2:hls_allow_cache=0:hls_flags={flags}]"
+            f"{_tee_path(self.hls_playlist)}"
+        )
+        return f'-f tee -shortest "{archive}|{live}"'
 
     def argv(self) -> list[str]:
         downloader = str(self.tools.downloader) if self.tools.downloader else "N_m3u8DL-RE"
@@ -117,7 +169,8 @@ class CapturePlan:
         if self.live and self.paced:
             # Part of the command in every sense that matters; omitting it from
             # the printed form would make a copied command behave differently.
-            shown = f'{PIPE_OPTIONS_ENV}="{self.muxed_output}" {shown}'
+            options = self.pipe_options.replace('"', '\\"')
+            shown = f'{PIPE_OPTIONS_ENV}="{options}" {shown}'
         return shown
 
 
@@ -125,6 +178,8 @@ def run(plan: CapturePlan) -> int:
     """Run the downloader to completion. Returns its exit status."""
     plan.tools.verify()
     plan.out_dir.mkdir(parents=True, exist_ok=True)
+    if plan.hls:
+        plan.hls_directory.mkdir(parents=True, exist_ok=True)
     try:
         finished = subprocess.run(plan.argv(), env=plan.environment(), check=False)
     except FileNotFoundError as exc:

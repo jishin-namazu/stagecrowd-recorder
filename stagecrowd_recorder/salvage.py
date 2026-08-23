@@ -63,6 +63,9 @@ def locate(target: Path) -> ShardLocation:
     relative = record.get("shard_root_relative")
     if relative:
         candidates.append((target / relative).resolve())
+    session = record.get("session_shard_root")
+    if session:
+        candidates.append(Path(session))
     run_name = record.get("run_name")
     if run_name:
         candidates.append(shards.shard_root(str(run_name)))
