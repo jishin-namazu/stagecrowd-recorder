@@ -211,8 +211,10 @@ def timestamp_from_decode_time(
     candidate_decode_time: int,
     timescale: int,
 ) -> int:
-    return anchor_timestamp_ms + round(
-        (candidate_decode_time - anchor_decode_time) * 1000 / timescale
+    return (
+        anchor_timestamp_ms
+        + (candidate_decode_time * 1000 // timescale)
+        - (anchor_decode_time * 1000 // timescale)
     )
 
 
@@ -303,7 +305,12 @@ def _plans(target: Path) -> tuple[salvage.ShardLocation, Path, tuple[TrackPlan, 
         if track is None or track.init is None:
             continue
         try:
-            segment = stream["Playlist"]["MediaParts"][0]["MediaSegments"][0]
+            segments = stream["Playlist"]["MediaParts"][0]["MediaSegments"]
+            local_stamps = set(track.stamps())
+            segment = next(
+                (item for item in segments if _datetime_ms(item["DateTime"]) in local_stamps),
+                segments[0],
+            )
             indexed = IndexedUrl.parse(segment["Url"])
             anchor_index = int(segment["Index"])
             anchor_timestamp = _datetime_ms(segment["DateTime"])
@@ -466,11 +473,13 @@ def run(
         failures: list[int] = []
         if missing and not scan_only:
             anchor_path = local_indexes.get(plan.anchor_index)
+            anchor_timestamp_ms = plan.anchor_timestamp_ms
             if anchor_path is None:
                 anchor_path = min(
-                    plan.track.shards,
+                    local_indexes.values(),
                     key=lambda path: abs(int(shards.sequence_of(path)) - plan.anchor_timestamp_ms),
                 )
+                anchor_timestamp_ms = int(shards.sequence_of(anchor_path))
             try:
                 anchor_decode = read_tfdt(anchor_path.read_bytes())
                 timescale = read_timescale(plan.track.init.read_bytes())  # type: ignore[union-attr]
@@ -486,7 +495,7 @@ def run(
                         _download(plan.indexed.with_index(index), encrypted, rate_limit)
                         decode_time = read_tfdt(encrypted.read_bytes())
                         stamp = timestamp_from_decode_time(
-                            anchor_timestamp_ms=plan.anchor_timestamp_ms,
+                            anchor_timestamp_ms=anchor_timestamp_ms,
                             anchor_decode_time=anchor_decode,
                             candidate_decode_time=decode_time,
                             timescale=timescale,
