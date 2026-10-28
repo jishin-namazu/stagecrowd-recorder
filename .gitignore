@@ -42,6 +42,3 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
-
-# Tests are kept local
-tests/
